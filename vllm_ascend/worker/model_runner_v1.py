@@ -3461,8 +3461,8 @@ class NPUModelRunner(LoRAModelRunnerMixin, ECConnectorModelRunnerMixin):
             corresponding memory buffer for KV cache.
         """
 
-        if get_ascend_device_type() == AscendDeviceType._310P:
-            return self._initialize_kv_cache_tensors_310p(kv_cache_config)
+        # if get_ascend_device_type() == AscendDeviceType._310P:
+        #     return self._initialize_kv_cache_tensors_310p(kv_cache_config)
         # Initialize the memory buffer for KV cache
         kv_cache_raw_tensors = self._allocate_kv_cache_tensors(kv_cache_config)
         # Change the memory buffer to the desired shape
