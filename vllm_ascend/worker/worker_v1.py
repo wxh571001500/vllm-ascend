@@ -50,7 +50,7 @@ from vllm_ascend.platform import NPUPlatform
 from vllm_ascend.utils import (init_ascend_soc_version, is_enable_nz,
                                prefill_context_parallel_enable,
                                register_ascend_customop, sleep_mode_enabled,
-                               try_register_lib, vllm_version_is)
+                               try_register_lib, vllm_version_is, is_310p)
 from vllm_ascend.worker.model_runner_v1 import NPUModelRunner
 
 torch._dynamo.trace_rules.clear_lru_cache()  # noqa: E402
@@ -341,7 +341,8 @@ class NPUWorker(WorkerBase):
             self.model_runner.capture_model()
         # Call ATB matmul to warm up; otherwise, the first operation (ReshapeAndCache)
         # may cause performance degradation at runtime.
-        self._warm_up_atb()
+        if not is_310p():
+            self._warm_up_atb()
         # Reset the seed to ensure that the random state is not affected by
         # the model initialization and profiling.
         NPUPlatform.seed_everything(self.model_config.seed)

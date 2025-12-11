@@ -68,6 +68,7 @@ from vllm.model_executor.models.utils import WeightsMapper, maybe_prefix
 from vllm.multimodal import MULTIMODAL_REGISTRY
 
 from vllm_ascend.models.qwen2_5_vl import AscendQwen2_5_VisionRotaryEmbedding
+from vllm_ascend.utils import is_310p
 
 
 class AscendQwen2_5_VisionAttention_Without_Padding(Qwen2_5_VisionAttention):
@@ -107,30 +108,61 @@ class AscendQwen2_5_VisionAttention_Without_Padding(Qwen2_5_VisionAttention):
 
         q, k, v = (rearrange(x, "s b ... -> b s ...").contiguous()
                    for x in (q, k, v))
-        q = torch_npu.npu_rotary_mul(q, cos, sin)
-        k = torch_npu.npu_rotary_mul(k, cos, sin)
 
-        q, k, v = [
-            rearrange(x, "b s h d -> (b s) h d").contiguous()
-            for x in (q, k, v)
-        ]
+        q = torch_npu.npu_rotary_mul(q, cos, sin).half()
+        k = torch_npu.npu_rotary_mul(k, cos, sin).half()
 
-        context_layer = torch.empty_like(q)
+        if is_310p():
+            original_dim = q.size(-1)
+            pad_size = (16 - original_dim % 16) % 16
+            if pad_size > 0:
+                q = torch.nn.functional.pad(q, (0, pad_size), mode='constant', value=0.0)
+                k = torch.nn.functional.pad(k, (0, pad_size), mode='constant', value=0.0)
+                v = torch.nn.functional.pad(v, (0, pad_size), mode='constant', value=0.0)
+            outputs = []
+            for i in range(1, len(cu_seqlens)):
+                start_idx = cu_seqlens[i - 1]
+                end_idx = cu_seqlens[i]
+                q_i = q[:, start_idx:end_idx]
+                k_i = k[:, start_idx:end_idx]
+                v_i = v[:, start_idx:end_idx]
 
-        # operator requires pta version >= 2.5.1.dev20250226
-        torch_npu._npu_flash_attention_unpad(
-            query=q,
-            key=k,
-            value=v,
-            seq_len=cu_seqlens,
-            scale_value=self.hidden_size_per_attention_head**-0.5,
-            num_heads=self.num_attention_heads_per_partition,
-            num_kv_heads=self.num_attention_heads_per_partition,
-            out=context_layer)
+                output_i = torch_npu.npu_prompt_flash_attention(q_i, k_i, v_i,
+                    input_layout='BSND',
+                    num_heads=self.num_attention_heads_per_partition,
+                    scale_value=self.hidden_size_per_attention_head ** -0.5,
+                    num_key_value_heads=self.num_attention_heads_per_partition,
+                    pre_tokens=65535,
+                    next_tokens=65535)
+                outputs.append(output_i)
+            context_layer = torch.cat(outputs, dim=1)
 
-        context_layer = rearrange(context_layer,
-                                  "(b s) h d -> s b (h d)",
-                                  b=batch_size).contiguous()
+            if pad_size > 0:
+                context_layer = context_layer[..., :original_dim]
+
+            context_layer = rearrange(context_layer, "b s h d -> s b (h d)").contiguous()
+        else:
+            q, k, v = [
+                rearrange(x, "b s h d -> (b s) h d").contiguous()
+                for x in (q, k, v)
+            ]
+
+            context_layer = torch.empty_like(q)
+
+            # operator requires pta version >= 2.5.1.dev20250226
+            torch_npu._npu_flash_attention_unpad(
+                query=q,
+                key=k,
+                value=v,
+                seq_len=cu_seqlens,
+                scale_value=self.hidden_size_per_attention_head**-0.5,
+                num_heads=self.num_attention_heads_per_partition,
+                num_kv_heads=self.num_attention_heads_per_partition,
+                out=context_layer)
+
+            context_layer = rearrange(context_layer,
+                                      "(b s) h d -> s b (h d)",
+                                      b=batch_size).contiguous()
 
         output, _ = self.proj(context_layer)
         return output
@@ -328,6 +360,9 @@ class AscendQwen2_5_VisionTransformer_Without_Padding(Qwen2_5_VisionTransformer
         rotary_pos_emb = rotary_pos_emb.reshape(seq_len, -1)
 
         cos, sin = self.cal_cos_sin(rotary_pos_emb)
+        if is_310p():
+            cu_seqlens = cu_seqlens.to_list()
+            cu_window_seqlens = cu_window_seqlens.to_list()
 
         # transformers
         x = x.unsqueeze(1)
@@ -447,6 +482,9 @@ class AscendQwen3_VisionTransformer(Qwen3_VisionTransformer):
             grid_thw_tensor[:, 1] * grid_thw_tensor[:, 2],
             grid_thw_tensor[:, 0]).cpu().to(torch.int32)
         cu_seqlens = F.pad(cu_seqlens, (1, 0), value=0)
+
+        if is_310p():
+            cu_seqlens = torch.cumsum(cu_seqlens, dim=0)
 
         hidden_states = hidden_states.unsqueeze(1)
         rotary_pos_emb = rotary_pos_emb.to(hidden_states.device)
