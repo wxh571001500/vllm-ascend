@@ -109,10 +109,12 @@ class AscendQwen2_5_VisionAttention_Without_Padding(Qwen2_5_VisionAttention):
         q, k, v = (rearrange(x, "s b ... -> b s ...").contiguous()
                    for x in (q, k, v))
 
-        q = torch_npu.npu_rotary_mul(q, cos, sin).half()
-        k = torch_npu.npu_rotary_mul(k, cos, sin).half()
+        q = torch_npu.npu_rotary_mul(q, cos, sin)
+        k = torch_npu.npu_rotary_mul(k, cos, sin)
 
         if is_310p():
+            q = q.half()
+            k = k.half()
             original_dim = q.size(-1)
             pad_size = (16 - original_dim % 16) % 16
             if pad_size > 0:
