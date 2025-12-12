@@ -35,7 +35,7 @@ def communication_adaptation_310p():
 
     def broadcast310p_wrapper(fn):
 
-        def broadcast310p(tensor, src, group=None, async_op=False, group_src=None):
+        def broadcast310p(tensor, src, group=None, async_op=False):
             if tensor.device == torch.device('cpu'):
                 return fn(tensor, src, group, async_op)
             rank = torch.distributed.get_rank(group)
